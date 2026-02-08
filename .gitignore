@@ -7,6 +7,7 @@
 # OAuth credentials and tokens (NEVER commit)
 **/credentials.json
 **/token.json
+**/*_token.json
 **/client_secret*.json
 
 # Go build artifacts

@@ -98,9 +98,9 @@ func SyncAccount(store *db.DB, projectRoot, account string, forceFull bool, incl
 		}
 	}
 
-	// Exclude spam and trash by default.
+	// Only sync inbox by default (excludes drafts, sent-only, spam, trash).
 	if !includeSpam {
-		query += " -in:spam -in:trash"
+		query += " in:inbox"
 	}
 
 	// Search Gmail natively.

@@ -73,6 +73,6 @@ var syncCmd = &cobra.Command{
 func init() {
 	syncCmd.Flags().BoolVar(&syncFull, "full", false, "Force full 72h re-scan")
 	syncCmd.Flags().StringVar(&syncAccount, "account", "", "Sync single account")
-	syncCmd.Flags().BoolVar(&syncIncludeSpam, "include-spam", false, "Include Gmail spam and trash in sync")
+	syncCmd.Flags().BoolVar(&syncIncludeSpam, "include-spam", false, "Sync all mail (not just inbox) — includes spam, trash, sent, drafts")
 	rootCmd.AddCommand(syncCmd)
 }
