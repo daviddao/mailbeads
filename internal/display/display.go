@@ -65,7 +65,7 @@ func PriorityLabel(priority string) string {
 func AccountLabel(account string) string {
 	if idx := strings.Index(account, "@"); idx > 0 {
 		domain := account[idx+1:]
-		// Use the domain name without TLD (e.g., "company.com" -> "company")
+		// Use the domain name without TLD (e.g., "example.com" -> "workorg")
 		if dotIdx := strings.Index(domain, "."); dotIdx > 0 {
 			return domain[:dotIdx]
 		}

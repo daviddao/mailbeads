@@ -12,8 +12,9 @@ import (
 )
 
 var (
-	syncFull    bool
-	syncAccount string
+	syncFull        bool
+	syncAccount     string
+	syncIncludeSpam bool
 )
 
 var syncCmd = &cobra.Command{
@@ -46,7 +47,7 @@ var syncCmd = &cobra.Command{
 
 		summary := &types.SyncSummary{}
 		for _, account := range accounts {
-			result, err := msync.SyncAccount(store, root, account, syncFull, quietFlag)
+			result, err := msync.SyncAccount(store, root, account, syncFull, syncIncludeSpam, quietFlag)
 			if err != nil {
 				return err
 			}
@@ -72,5 +73,6 @@ var syncCmd = &cobra.Command{
 func init() {
 	syncCmd.Flags().BoolVar(&syncFull, "full", false, "Force full 72h re-scan")
 	syncCmd.Flags().StringVar(&syncAccount, "account", "", "Sync single account")
+	syncCmd.Flags().BoolVar(&syncIncludeSpam, "include-spam", false, "Include Gmail spam and trash in sync")
 	rootCmd.AddCommand(syncCmd)
 }

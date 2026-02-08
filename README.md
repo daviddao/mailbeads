@@ -28,7 +28,7 @@ mb stats
 
 ## Features
 
-- **Gmail Sync:** Fetches emails from multiple Gmail accounts into a local SQLite database.
+- **Gmail Sync:** Fetches emails from multiple Gmail accounts into a local SQLite database. Spam and trash are excluded by default (`--include-spam` to override).
 - **Agent-Optimized:** All commands support `--json` for machine-readable output.
 - **Triage Workflow:** Analyze threads, assign priority, suggest actions, track status.
 - **Partial ID Matching:** `mb done abc` matches triage IDs starting with "abc".
@@ -39,7 +39,7 @@ mb stats
 
 | Command | Action |
 | --- | --- |
-| `mb sync` | Fetch latest emails from Gmail |
+| `mb sync` | Fetch latest emails from Gmail (excludes spam/trash) |
 | `mb untriaged` | List threads needing triage |
 | `mb show THREAD_ID` | View thread detail with emails |
 | `mb triage THREAD_ID --action "..." --priority high` | Create triage entry |
@@ -65,8 +65,9 @@ mb prime --full
 ## Triage Workflow
 
 ```bash
-# 1. Sync latest emails
+# 1. Sync latest emails (spam/trash excluded by default)
 mb sync
+# mb sync --include-spam    # include spam and trash
 
 # 2. Find threads needing triage
 mb untriaged --json
@@ -120,10 +121,61 @@ sudo mv mb /usr/local/bin/
 
 ## Prerequisites
 
-1. **Go 1.21+** for building
-2. **Gmail OAuth credentials** at `./ACCOUNT_EMAIL/credentials.json` relative to your project root
+Mailbeads syncs Gmail using native Go API calls via OAuth 2.0. You need a `credentials.json` file from Google Cloud.
 
-Accounts are auto-discovered from `*/credentials.json` directories in the project root.
+### Getting `credentials.json`
+
+#### 1. Create a Google Cloud Project
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project (or select an existing one)
+3. Navigate to **APIs & Services** > **Library**
+4. Search for **Gmail API** and click **Enable**
+
+#### 2. Configure the OAuth Consent Screen
+
+1. Go to **APIs & Services** > **OAuth consent screen**
+2. Select **External** user type, click **Create**
+3. Fill in the app name and your email
+4. Add scopes:
+   - `https://www.googleapis.com/auth/gmail.readonly`
+   - `https://www.googleapis.com/auth/gmail.modify`
+5. Under **Test users**, add the Gmail address you want to sync
+
+#### 3. Create OAuth Credentials
+
+1. Go to **APIs & Services** > **Credentials**
+2. Click **Create Credentials** > **OAuth client ID**
+3. Select **Desktop app** as the application type
+4. Click **Create**, then **Download JSON**
+5. Rename the downloaded file to `credentials.json`
+
+#### 4. Set Up the Account Directory
+
+Place the credentials in a directory named after your email address, at the project root:
+
+```
+your-project/
+  user@gmail.com/
+    credentials.json      ← put it here
+  another@example.com/    ← add more accounts the same way
+    credentials.json
+  .mailbeads/
+    mail.db
+```
+
+Mailbeads auto-discovers accounts by scanning for `*/credentials.json` directories.
+
+#### 5. First Sync
+
+Run `mb sync` — it will open your browser for OAuth consent on first use. A `token.json` file is saved next to `credentials.json` for future use.
+
+```bash
+mb sync
+# Browser opens → sign in → grant access → done
+```
+
+> **Security:** Never commit `credentials.json` or `token.json`. They are in `.gitignore` by default.
 
 ## How It Works
 
@@ -134,8 +186,7 @@ Gmail Accounts ──> mb sync ──> .mailbeads/mail.db ──> mb triage ─�
 
 - **`.mailbeads/mail.db`** — SQLite database storing emails and triage entries
 - **`mb init`** creates the database and adds `.mailbeads/` to `.gitignore`
-- **`mb sync`** fetches emails using native Go Gmail API calls
-- **`mb gmail search/read`** — search and read emails directly via Gmail API
+- **`mb sync`** fetches emails via native Go Gmail API calls (spam and trash excluded by default)
 - **Triage entries** are created by AI agents analyzing thread content
 - **Frontend** reads from the database for the Inbox sidebar
 

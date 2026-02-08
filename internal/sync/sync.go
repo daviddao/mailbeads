@@ -55,7 +55,7 @@ func toGmailDate(isoDate string) string {
 }
 
 // SyncAccount fetches emails for a single account using native Go Gmail API.
-func SyncAccount(store *db.DB, projectRoot, account string, forceFull bool, quiet bool) (*types.SyncResult, error) {
+func SyncAccount(store *db.DB, projectRoot, account string, forceFull bool, includeSpam bool, quiet bool) (*types.SyncResult, error) {
 	result := &types.SyncResult{Account: account}
 	ctx := context.Background()
 
@@ -96,6 +96,11 @@ func SyncAccount(store *db.DB, projectRoot, account string, forceFull bool, quie
 		if !quiet {
 			fmt.Printf("\n  %s — full sync (last 72h)\n", account)
 		}
+	}
+
+	// Exclude spam and trash by default.
+	if !includeSpam {
+		query += " -in:spam -in:trash"
 	}
 
 	// Search Gmail natively.
