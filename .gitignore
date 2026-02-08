@@ -1,0 +1,32 @@
+# Compiled binary
+/mb
+
+# Mailbeads database (local email data — never commit)
+.mailbeads/
+
+# OAuth credentials and tokens (NEVER commit)
+**/credentials.json
+**/token.json
+**/client_secret*.json
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go workspace
+go.work
+go.work.sum
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
