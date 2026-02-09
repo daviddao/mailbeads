@@ -4,17 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/daviddao/mailbeads/internal/beads"
 	"github.com/daviddao/mailbeads/internal/display"
 	"github.com/spf13/cobra"
 )
 
 type statsOutput struct {
 	Emails     map[string]accountStats `json:"emails"`
-	Triage     map[string]int          `json:"triage"`
-	Priority   map[string]int          `json:"priority"`
 	Untriaged  int                     `json:"untriaged"`
+	Triaged    int                     `json:"triaged"`
 	TotalEmail int                     `json:"total_emails"`
 	Threads    int                     `json:"threads"`
+	BeadsOpen  int                     `json:"beads_open,omitempty"`
 }
 
 type accountStats struct {
@@ -36,27 +37,27 @@ var statsCmd = &cobra.Command{
 			totalEmails += count
 		}
 
-		triageCounts, err := store.TriageCountByStatus()
-		if err != nil {
-			return fmt.Errorf("triage counts: %w", err)
-		}
-
-		priorityCounts, err := store.TriageCountByPriority()
-		if err != nil {
-			return fmt.Errorf("priority counts: %w", err)
-		}
-
 		untriaged := store.UntriagedCount()
+		triaged := store.TriagedCount()
 		threads := store.ThreadCount()
+
+		// Get beads open count if available.
+		beadsOpen := 0
+		if beads.Available() {
+			issues, err := beads.List([]string{"email", "triage"}, "open", 0)
+			if err == nil {
+				beadsOpen = len(issues)
+			}
+		}
 
 		if jsonOutput {
 			out := statsOutput{
 				Emails:     emailStats,
-				Triage:     triageCounts,
-				Priority:   priorityCounts,
 				Untriaged:  untriaged,
+				Triaged:    triaged,
 				TotalEmail: totalEmails,
 				Threads:    threads,
+				BeadsOpen:  beadsOpen,
 			}
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
@@ -79,30 +80,11 @@ var statsCmd = &cobra.Command{
 		fmt.Println()
 
 		fmt.Println("  Triage")
-		pending := triageCounts["pending"]
-		detail := ""
-		if pending > 0 {
-			parts := []string{}
-			for _, p := range []string{"high", "medium", "low"} {
-				if c := priorityCounts[p]; c > 0 {
-					parts = append(parts, fmt.Sprintf("%d %s", c, p))
-				}
-			}
-			if len(parts) > 0 {
-				detail = " ("
-				for i, p := range parts {
-					if i > 0 {
-						detail += ", "
-					}
-					detail += p
-				}
-				detail += ")"
-			}
-		}
-		fmt.Printf("    Pending    %3d%s\n", pending, detail)
-		fmt.Printf("    Done       %3d\n", triageCounts["done"])
-		fmt.Printf("    Dismissed  %3d\n", triageCounts["dismissed"])
+		fmt.Printf("    Triaged    %3d threads\n", triaged)
 		fmt.Printf("    Untriaged  %3d threads\n", untriaged)
+		if beadsOpen > 0 {
+			fmt.Printf("    Open beads %3d issues\n", beadsOpen)
+		}
 		fmt.Println()
 
 		fmt.Printf("  Total: %d emails across %d threads\n", totalEmails, threads)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/daviddao/mailbeads/internal/beads"
 	"github.com/daviddao/mailbeads/internal/display"
 	"github.com/spf13/cobra"
 )
@@ -12,34 +13,37 @@ var readyAccount string
 
 var readyCmd = &cobra.Command{
 	Use:   "ready",
-	Short: "List actionable triage items (not snoozed, not blocked)",
+	Short: "List actionable triage items from beads (open, no blockers)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		items, err := store.ReadyTriage(readyAccount)
+		if !beads.Available() {
+			return fmt.Errorf("bd (beads) CLI not found on PATH")
+		}
+
+		labels := []string{"email", "triage"}
+		issues, err := beads.Ready(labels, 20)
 		if err != nil {
-			return fmt.Errorf("query ready: %w", err)
+			return fmt.Errorf("query beads: %w", err)
 		}
 
 		if jsonOutput {
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
-			return enc.Encode(items)
+			return enc.Encode(issues)
 		}
 
-		if len(items) == 0 {
+		if len(issues) == 0 {
 			fmt.Println("Nothing actionable right now.")
 			return nil
 		}
 
-		fmt.Printf("Ready (%d actionable):\n\n", len(items))
-		for _, t := range items {
-			id := display.Truncate(t.ID, 8)
-			fmt.Printf("  %s %s  %s  %-12s  %-35s  %s\n",
-				display.PriorityDot(t.Priority),
-				display.Dim.Render(id),
-				display.PriorityLabel(t.Priority),
-				display.AccountLabel(t.Account),
-				display.Truncate(t.Subject, 35),
-				display.Dim.Render(t.Action),
+		fmt.Printf("Ready (%d actionable):\n\n", len(issues))
+		for _, issue := range issues {
+			pri := beads.PriorityFromBeads(issue.Priority)
+			fmt.Printf("  %s %s  %s  %s\n",
+				display.PriorityDot(pri),
+				display.Dim.Render(issue.ID),
+				display.PriorityLabel(pri),
+				display.Dim.Render(issue.Title),
 			)
 		}
 		return nil

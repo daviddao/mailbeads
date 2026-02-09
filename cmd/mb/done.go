@@ -3,48 +3,48 @@ package main
 import (
 	"fmt"
 
+	"github.com/daviddao/mailbeads/internal/beads"
 	"github.com/daviddao/mailbeads/internal/display"
-	"github.com/daviddao/mailbeads/internal/types"
 	"github.com/spf13/cobra"
 )
 
 var doneCmd = &cobra.Command{
-	Use:   "done ID [ID...]",
-	Short: "Mark triage entries as done",
+	Use:   "done BEAD_ID [BEAD_ID...]",
+	Short: "Mark triage entries as done (closes the beads issue)",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !beads.Available() {
+			return fmt.Errorf("bd (beads) CLI not found on PATH")
+		}
 		for _, id := range args {
-			t, err := store.GetTriageByID(id)
-			if err != nil {
-				display.ErrorMsg("%v", err)
+			if err := beads.Close(id, "done"); err != nil {
+				display.ErrorMsg("close %s: %v", id, err)
 				continue
 			}
-			if err := store.UpdateTriageStatus(t.ID, types.StatusDone); err != nil {
-				display.ErrorMsg("failed to update %s: %v", t.ID, err)
-				continue
-			}
-			display.SuccessMsg("Done: %s %q", t.ID, t.Subject)
+			// Clean up local cross-reference.
+			store.DeleteTriageRef(id)
+			display.SuccessMsg("Done: %s", id)
 		}
 		return nil
 	},
 }
 
 var dismissCmd = &cobra.Command{
-	Use:   "dismiss ID [ID...]",
-	Short: "Dismiss triage entries (spam/irrelevant)",
+	Use:   "dismiss BEAD_ID [BEAD_ID...]",
+	Short: "Dismiss triage entries (closes as spam/irrelevant)",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if !beads.Available() {
+			return fmt.Errorf("bd (beads) CLI not found on PATH")
+		}
 		for _, id := range args {
-			t, err := store.GetTriageByID(id)
-			if err != nil {
-				display.ErrorMsg("%v", err)
+			if err := beads.Close(id, "dismissed — spam/irrelevant"); err != nil {
+				display.ErrorMsg("dismiss %s: %v", id, err)
 				continue
 			}
-			if err := store.UpdateTriageStatus(t.ID, types.StatusDismissed); err != nil {
-				display.ErrorMsg("failed to update %s: %v", t.ID, err)
-				continue
-			}
-			fmt.Printf("%s Dismissed: %s %q\n", display.Dim.Render("✗"), t.ID, t.Subject)
+			// Clean up local cross-reference.
+			store.DeleteTriageRef(id)
+			fmt.Printf("%s Dismissed: %s\n", display.Dim.Render("✗"), id)
 		}
 		return nil
 	},

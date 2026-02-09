@@ -3,38 +3,26 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
+	"github.com/daviddao/mailbeads/internal/beads"
 	"github.com/daviddao/mailbeads/internal/display"
 	"github.com/spf13/cobra"
 )
 
 type statusOutput struct {
 	Summary     statusSummary     `json:"summary"`
-	HighItems   []statusItem      `json:"high_priority"`
-	ActionItems []statusItem      `json:"action_items"`
+	HighItems   []beads.Issue     `json:"high_priority"`
+	ActionItems []beads.Issue     `json:"action_items"`
 	SyncState   []statusSyncState `json:"sync_state"`
 }
 
 type statusSummary struct {
-	TotalEmails int            `json:"total_emails"`
-	Threads     int            `json:"threads"`
-	Untriaged   int            `json:"untriaged"`
-	Pending     int            `json:"pending"`
-	Done        int            `json:"done"`
-	Dismissed   int            `json:"dismissed"`
-	Priority    map[string]int `json:"priority"`
-	Ready       int            `json:"ready"`
-}
-
-type statusItem struct {
-	ID       string `json:"id"`
-	ThreadID string `json:"thread_id"`
-	Priority string `json:"priority"`
-	Account  string `json:"account"`
-	Subject  string `json:"subject"`
-	Action   string `json:"action"`
-	From     string `json:"from_addr,omitempty"`
+	TotalEmails int `json:"total_emails"`
+	Threads     int `json:"threads"`
+	Untriaged   int `json:"untriaged"`
+	Triaged     int `json:"triaged"`
+	BeadsOpen   int `json:"beads_open"`
+	BeadsReady  int `json:"beads_ready"`
 }
 
 type statusSyncState struct {
@@ -51,14 +39,9 @@ var statusCmd = &cobra.Command{
 	Short:   "Show inbox overview: sync state, triage summary, and high-priority items",
 	Long: `Show a quick snapshot of your mailbeads inbox state.
 
-Combines sync state, triage statistics, and high-priority items into a
-single view — similar to how 'bd status' shows project issue state or
-'git status' shows working tree state.
-
-Use cases:
-  - Quick morning inbox check
-  - Agent onboarding context
-  - Integration with shell prompts
+Combines sync state, email statistics, and beads triage items into a
+single view. Triage state (priority, status, dependencies) is read from
+the beads (.beads/) database.
 
 Examples:
   mb status                # Full status overview
@@ -83,63 +66,43 @@ Examples:
 			totalEmails += count
 		}
 
-		// Triage counts
-		triageCounts, err := store.TriageCountByStatus()
-		if err != nil {
-			return fmt.Errorf("triage counts: %w", err)
-		}
-		priorityCounts, err := store.TriageCountByPriority()
-		if err != nil {
-			return fmt.Errorf("priority counts: %w", err)
-		}
 		untriaged := store.UntriagedCount()
+		triaged := store.TriagedCount()
 		threads := store.ThreadCount()
 
-		// High-priority items
-		highItems, err := store.ListTriage("pending", "", false)
-		if err != nil {
-			return fmt.Errorf("list high: %w", err)
-		}
-		var highList []statusItem
-		for _, t := range highItems {
-			if t.Priority == "high" {
-				highList = append(highList, statusItem{
-					ID:       t.ID,
-					ThreadID: t.ThreadID,
-					Priority: t.Priority,
-					Account:  t.Account,
-					Subject:  t.Subject,
-					Action:   t.Action,
-					From:     t.From,
-				})
+		// Get beads data.
+		var openIssues []beads.Issue
+		var readyIssues []beads.Issue
+		hasBd := beads.Available()
+
+		if hasBd {
+			var err error
+			openIssues, err = beads.List([]string{"email", "triage"}, "open", 50)
+			if err != nil {
+				openIssues = nil
+			}
+
+			if !statusNoReady {
+				readyIssues, err = beads.Ready([]string{"email", "triage"}, 20)
+				if err != nil {
+					readyIssues = nil
+				}
 			}
 		}
 
-		// Ready (actionable) items
-		var readyCount int
-		var actionItems []statusItem
-		if !statusNoReady {
-			readyItems, err := store.ReadyTriage("")
-			if err == nil {
-				readyCount = len(readyItems)
-				// Show up to 5 top ready items (non-spam)
-				for _, t := range readyItems {
-					if t.Priority == "spam" {
-						continue
-					}
-					if len(actionItems) >= 5 {
-						break
-					}
-					actionItems = append(actionItems, statusItem{
-						ID:       t.ID,
-						ThreadID: t.ThreadID,
-						Priority: t.Priority,
-						Account:  t.Account,
-						Subject:  t.Subject,
-						Action:   t.Action,
-						From:     t.From,
-					})
-				}
+		// Split into high-priority and others.
+		var highItems []beads.Issue
+		for _, issue := range openIssues {
+			if issue.Priority <= 1 { // P0 or P1
+				highItems = append(highItems, issue)
+			}
+		}
+
+		// Top actionable items (non-high).
+		var actionItems []beads.Issue
+		for _, issue := range readyIssues {
+			if issue.Priority > 1 && len(actionItems) < 5 {
+				actionItems = append(actionItems, issue)
 			}
 		}
 
@@ -147,18 +110,16 @@ Examples:
 			TotalEmails: totalEmails,
 			Threads:     threads,
 			Untriaged:   untriaged,
-			Pending:     triageCounts["pending"],
-			Done:        triageCounts["done"],
-			Dismissed:   triageCounts["dismissed"],
-			Priority:    priorityCounts,
-			Ready:       readyCount,
+			Triaged:     triaged,
+			BeadsOpen:   len(openIssues),
+			BeadsReady:  len(readyIssues),
 		}
 
 		// --- Output ---
 		if jsonOutput {
 			out := statusOutput{
 				Summary:     summary,
-				HighItems:   highList,
+				HighItems:   highItems,
 				ActionItems: actionItems,
 				SyncState:   syncStates,
 			}
@@ -186,93 +147,55 @@ Examples:
 
 		// Triage overview
 		fmt.Println("  Triage")
-		pending := triageCounts["pending"]
-
-		// Build pending breakdown
-		detail := ""
-		if pending > 0 {
-			var parts []string
-			for _, p := range []string{"high", "medium", "low"} {
-				if c := priorityCounts[p]; c > 0 {
-					parts = append(parts, fmt.Sprintf("%d %s", c, p))
-				}
-			}
-			if len(parts) > 0 {
-				detail = " (" + strings.Join(parts, ", ") + ")"
-			}
-		}
-		fmt.Printf("    Pending:     %3d%s\n", pending, detail)
-		fmt.Printf("    Done:        %3d\n", triageCounts["done"])
-		fmt.Printf("    Dismissed:   %3d\n", triageCounts["dismissed"])
 		if untriaged > 0 {
 			fmt.Printf("    Untriaged:   %s\n", display.ErrStyle.Render(fmt.Sprintf("%3d threads", untriaged)))
 		} else {
 			fmt.Printf("    Untriaged:     0 %s\n", display.Success.Render("(all triaged)"))
 		}
-		if !statusNoReady {
-			fmt.Printf("    Ready:       %3d actionable\n", readyCount)
+		fmt.Printf("    Triaged:     %3d threads\n", triaged)
+		if hasBd {
+			fmt.Printf("    Open beads:  %3d issues\n", len(openIssues))
+			if !statusNoReady {
+				fmt.Printf("    Ready:       %3d actionable\n", len(readyIssues))
+			}
+		} else {
+			fmt.Printf("    %s\n", display.Dim.Render("(bd not found — install from https://beads.sh)"))
 		}
 		fmt.Println()
 
 		// High-priority items
-		if len(highList) > 0 {
-			fmt.Printf("  High Priority (%d)\n", len(highList))
-			for _, item := range highList {
-				id := display.Truncate(item.ID, 8)
-				fmt.Printf("    %s %s  %-12s  %s\n",
+		if len(highItems) > 0 {
+			fmt.Printf("  High Priority (%d)\n", len(highItems))
+			for _, issue := range highItems {
+				fmt.Printf("    %s %s  %s\n",
 					display.PriorityDot("high"),
-					display.Dim.Render(id),
-					display.AccountLabel(item.Account),
-					display.Truncate(item.Subject, 45),
-				)
-				fmt.Printf("      %s  %s\n",
-					display.Dim.Render("action:"),
-					item.Action,
+					display.Dim.Render(issue.ID),
+					display.Truncate(issue.Title, 55),
 				)
 			}
 			fmt.Println()
 		}
 
-		// Top actionable items (if different from high)
+		// Top actionable items
 		if !statusNoReady && len(actionItems) > 0 {
-			// Only show this section if there are non-high items to display
-			hasNonHigh := false
-			for _, item := range actionItems {
-				if item.Priority != "high" {
-					hasNonHigh = true
-					break
-				}
+			fmt.Printf("  Next Up\n")
+			for _, issue := range actionItems {
+				pri := beads.PriorityFromBeads(issue.Priority)
+				fmt.Printf("    %s %s  %s\n",
+					display.PriorityDot(pri),
+					display.Dim.Render(issue.ID),
+					display.Truncate(issue.Title, 55),
+				)
 			}
-			if hasNonHigh || len(highList) == 0 {
-				shown := 0
-				fmt.Printf("  Next Up\n")
-				for _, item := range actionItems {
-					// Skip high-priority items already shown above
-					if item.Priority == "high" {
-						continue
-					}
-					id := display.Truncate(item.ID, 8)
-					fmt.Printf("    %s %s  %-12s  %s\n",
-						display.PriorityDot(item.Priority),
-						display.Dim.Render(id),
-						display.AccountLabel(item.Account),
-						display.Truncate(item.Subject, 45),
-					)
-					fmt.Printf("      %s  %s\n",
-						display.Dim.Render("action:"),
-						display.Truncate(item.Action, 55),
-					)
-					shown++
-				}
-				if readyCount > len(highList)+shown {
-					fmt.Printf("    %s\n", display.Dim.Render(fmt.Sprintf("... and %d more (run 'mb ready' to see all)", readyCount-len(highList)-shown)))
-				}
-				fmt.Println()
+			remaining := len(readyIssues) - len(highItems) - len(actionItems)
+			if remaining > 0 {
+				fmt.Printf("    %s\n", display.Dim.Render(fmt.Sprintf("... and %d more (run 'mb ready' to see all)", remaining)))
 			}
+			fmt.Println()
 		}
 
 		// Hint
-		fmt.Printf("  %s\n", display.Dim.Render("Use 'mb inbox' to browse, 'mb show THREAD' to read, 'mb done ID' to clear."))
+		fmt.Printf("  %s\n", display.Dim.Render("Use 'mb inbox' to browse, 'mb show THREAD' to read, 'mb done BEAD_ID' to clear."))
 
 		return nil
 	},

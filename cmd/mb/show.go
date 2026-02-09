@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/daviddao/mailbeads/internal/beads"
 	"github.com/daviddao/mailbeads/internal/display"
 	"github.com/daviddao/mailbeads/internal/types"
 	"github.com/spf13/cobra"
@@ -15,16 +16,17 @@ var (
 )
 
 type showOutput struct {
-	ThreadID string         `json:"thread_id"`
-	Account  string         `json:"account"`
-	Subject  string         `json:"subject"`
-	Emails   []*types.Email `json:"emails"`
-	Triage   *types.Triage  `json:"triage,omitempty"`
+	ThreadID  string           `json:"thread_id"`
+	Account   string           `json:"account"`
+	Subject   string           `json:"subject"`
+	Emails    []*types.Email   `json:"emails"`
+	TriageRef *types.TriageRef `json:"triage_ref,omitempty"`
+	Bead      *beads.Issue     `json:"bead,omitempty"`
 }
 
 var showCmd = &cobra.Command{
 	Use:   "show THREAD_ID",
-	Short: "Display thread detail with emails and triage",
+	Short: "Display thread detail with emails and linked beads issue",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		threadID := args[0]
@@ -53,18 +55,25 @@ var showCmd = &cobra.Command{
 			return fmt.Errorf("no emails found for thread %q in %s", threadID, account)
 		}
 
-		triage, err := store.GetTriage(threadID, account)
+		triageRef, err := store.GetTriageRef(threadID, account)
 		if err != nil {
-			return fmt.Errorf("fetch triage: %w", err)
+			return fmt.Errorf("fetch triage ref: %w", err)
+		}
+
+		// Fetch beads issue if triaged.
+		var bead *beads.Issue
+		if triageRef != nil && beads.Available() {
+			bead, _ = beads.Show(triageRef.BeadID) // ignore error — bead may have been deleted
 		}
 
 		if jsonOutput {
 			out := showOutput{
-				ThreadID: threadID,
-				Account:  account,
-				Subject:  emails[0].Subject,
-				Emails:   emails,
-				Triage:   triage,
+				ThreadID:  threadID,
+				Account:   account,
+				Subject:   emails[0].Subject,
+				Emails:    emails,
+				TriageRef: triageRef,
+				Bead:      bead,
 			}
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
@@ -104,19 +113,18 @@ var showCmd = &cobra.Command{
 		}
 
 		fmt.Println()
-		if triage != nil {
-			fmt.Printf("  Triage: %s\n", display.TriageBadge(triage.Priority, triage.Action))
-			if triage.Suggestion != "" {
-				fmt.Printf("  Suggestion: %s\n", triage.Suggestion)
+		if bead != nil {
+			pri := beads.PriorityFromBeads(bead.Priority)
+			fmt.Printf("  Bead: %s %s\n", bead.ID, display.TriageBadge(pri, bead.Title))
+			if bead.Description != "" {
+				fmt.Printf("  Description: %s\n", bead.Description)
 			}
-			if triage.AgentNotes != "" {
-				fmt.Printf("  Notes: %s\n", display.Dim.Render(triage.AgentNotes))
+			if bead.Notes != "" {
+				fmt.Printf("  Notes: %s\n", display.Dim.Render(bead.Notes))
 			}
-			fmt.Printf("  Status: %s", triage.Status)
-			if triage.Category != "" {
-				fmt.Printf("  Category: %s", triage.Category)
-			}
-			fmt.Println()
+			fmt.Printf("  Status: %s\n", bead.Status)
+		} else if triageRef != nil {
+			fmt.Printf("  Bead: %s %s\n", triageRef.BeadID, display.Dim.Render("(not found in beads)"))
 		} else {
 			fmt.Println(display.Dim.Render("  Triage: (not yet triaged)"))
 		}

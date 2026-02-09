@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/daviddao/mailbeads/internal/auth"
+	"github.com/daviddao/mailbeads/internal/beads"
 	"github.com/daviddao/mailbeads/internal/db"
 	"github.com/daviddao/mailbeads/internal/gmail"
 	"github.com/daviddao/mailbeads/internal/types"
@@ -198,5 +199,50 @@ func SyncAccount(store *db.DB, projectRoot, account string, forceFull bool, incl
 		fmt.Printf("  ✓ %d new, %d already synced              \n", result.Fetched, result.Skipped)
 	}
 
+	// Auto-comment on beads issues for triaged threads that received new emails.
+	if result.Fetched > 0 && beads.Available() {
+		commented := notifyNewEmails(store, quiet)
+		result.Commented = commented
+	}
+
 	return result, nil
+}
+
+// notifyNewEmails checks for triaged threads that have new emails and adds
+// a comment to the corresponding beads issue.
+func notifyNewEmails(store *db.DB, quiet bool) int {
+	threads, err := store.ThreadsWithNewEmails()
+	if err != nil || len(threads) == 0 {
+		return 0
+	}
+
+	commented := 0
+	for _, t := range threads {
+		if t.TriageRef == nil {
+			continue
+		}
+		// Skip legacy refs that haven't been migrated yet.
+		if strings.HasPrefix(t.TriageRef.BeadID, "legacy-") {
+			continue
+		}
+
+		comment := fmt.Sprintf("New email activity on thread: %s (%d emails, latest from %s)",
+			t.Subject, t.EmailCount, t.From)
+
+		if err := beads.Comment(t.TriageRef.BeadID, comment); err != nil {
+			if !quiet {
+				fmt.Fprintf(os.Stderr, "  ! comment on %s: %v\n", t.TriageRef.BeadID, err)
+			}
+			continue
+		}
+
+		// Update the triage ref created_at to mark the notification as sent.
+		store.UpsertTriageRef(t.ThreadID, t.Account, t.TriageRef.BeadID)
+
+		commented++
+		if !quiet {
+			fmt.Printf("  → Notified %s of new email on %q\n", t.TriageRef.BeadID, t.Subject)
+		}
+	}
+	return commented
 }

@@ -1,6 +1,12 @@
 package db
 
 // Schema is the DDL for the mailbeads database.
+//
+// The triage table is a thin cross-reference mapping email threads to beads
+// issues. All triage state (priority, status, action, dependencies) lives in
+// the beads (.beads/) database — mailbeads only stores the mapping so that
+// mb untriaged / mb show can efficiently look up whether a thread has been
+// triaged without querying beads.
 const Schema = `
 CREATE TABLE IF NOT EXISTS emails (
     id          TEXT PRIMARY KEY,
@@ -20,38 +26,45 @@ CREATE TABLE IF NOT EXISTS emails (
 );
 
 CREATE TABLE IF NOT EXISTS triage (
-    id              TEXT PRIMARY KEY,
-    thread_id       TEXT NOT NULL,
-    account         TEXT NOT NULL,
-    subject         TEXT NOT NULL,
-    from_addr       TEXT,
-    priority        TEXT NOT NULL DEFAULT 'medium',
-    action          TEXT NOT NULL,
-    suggestion      TEXT,
-    agent_notes     TEXT,
-    category        TEXT,
-    status          TEXT NOT NULL DEFAULT 'pending',
-    snoozed_until   TEXT,
-    email_count     INTEGER DEFAULT 1,
-    latest_date     TEXT,
-    created_at      TEXT NOT NULL,
-    updated_at      TEXT,
+    thread_id   TEXT NOT NULL,
+    account     TEXT NOT NULL,
+    bead_id     TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
     UNIQUE(thread_id, account)
-);
-
-CREATE TABLE IF NOT EXISTS triage_deps (
-    triage_id       TEXT NOT NULL,
-    depends_on_id   TEXT NOT NULL,
-    created_at      TEXT NOT NULL,
-    PRIMARY KEY (triage_id, depends_on_id),
-    FOREIGN KEY (triage_id) REFERENCES triage(id),
-    FOREIGN KEY (depends_on_id) REFERENCES triage(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_emails_account ON emails(account);
 CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id);
 CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date DESC);
-CREATE INDEX IF NOT EXISTS idx_triage_status ON triage(status);
-CREATE INDEX IF NOT EXISTS idx_triage_priority ON triage(priority);
 CREATE INDEX IF NOT EXISTS idx_triage_thread ON triage(thread_id, account);
+CREATE INDEX IF NOT EXISTS idx_triage_bead ON triage(bead_id);
+`
+
+// MigrationV2 migrates from the old fat triage table to the new slim one.
+// It preserves the thread_id/account/created_at and maps the old triage ID
+// as a placeholder bead_id (prefixed with "legacy-") until migration runs.
+const MigrationV2 = `
+-- Check if old schema exists (has 'action' column)
+-- If so, rename old table and create new one
+ALTER TABLE triage RENAME TO triage_old;
+
+CREATE TABLE IF NOT EXISTS triage (
+    thread_id   TEXT NOT NULL,
+    account     TEXT NOT NULL,
+    bead_id     TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    UNIQUE(thread_id, account)
+);
+
+CREATE INDEX IF NOT EXISTS idx_triage_thread ON triage(thread_id, account);
+CREATE INDEX IF NOT EXISTS idx_triage_bead ON triage(bead_id);
+
+-- Copy pending entries with legacy prefix so they can be migrated
+INSERT INTO triage (thread_id, account, bead_id, created_at)
+    SELECT thread_id, account, 'legacy-' || id, created_at
+    FROM triage_old
+    WHERE status = 'pending';
+
+DROP TABLE IF EXISTS triage_old;
+DROP TABLE IF EXISTS triage_deps;
 `

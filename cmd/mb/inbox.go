@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
+	"github.com/daviddao/mailbeads/internal/beads"
 	"github.com/daviddao/mailbeads/internal/display"
 	"github.com/spf13/cobra"
 )
@@ -16,35 +18,53 @@ var (
 
 var inboxCmd = &cobra.Command{
 	Use:   "inbox",
-	Short: "List pending triage items sorted by priority",
+	Short: "List pending triage items from beads, sorted by priority",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		status := "pending"
+		if !beads.Available() {
+			return fmt.Errorf("bd (beads) CLI not found on PATH")
+		}
+
+		labels := []string{"email", "triage"}
+		status := "open"
 		if inboxAll {
 			status = ""
 		}
-		items, err := store.ListTriage(status, inboxAccount, inboxAll)
+
+		issues, err := beads.List(labels, status, 50)
 		if err != nil {
-			return fmt.Errorf("query inbox: %w", err)
+			return fmt.Errorf("query beads: %w", err)
 		}
 
-		// Filter by priority if specified
+		// Filter by priority if specified.
 		if inboxPriority != "" {
-			var filtered = items[:0]
-			for _, t := range items {
-				if t.Priority == inboxPriority {
-					filtered = append(filtered, t)
+			filtered := issues[:0]
+			for _, issue := range issues {
+				if beads.PriorityFromBeads(issue.Priority) == inboxPriority {
+					filtered = append(filtered, issue)
 				}
 			}
-			items = filtered
+			issues = filtered
+		}
+
+		// Filter by account if specified (match against notes which contain "account=X").
+		if inboxAccount != "" {
+			filtered := issues[:0]
+			for _, issue := range issues {
+				if strings.Contains(issue.Notes, "account="+inboxAccount) ||
+					strings.Contains(issue.Notes, inboxAccount) {
+					filtered = append(filtered, issue)
+				}
+			}
+			issues = filtered
 		}
 
 		if jsonOutput {
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
-			return enc.Encode(items)
+			return enc.Encode(issues)
 		}
 
-		if len(items) == 0 {
+		if len(issues) == 0 {
 			fmt.Println("Inbox clear.")
 			return nil
 		}
@@ -53,17 +73,15 @@ var inboxCmd = &cobra.Command{
 		if inboxAll {
 			label = "total"
 		}
-		fmt.Printf("Inbox (%d %s):\n\n", len(items), label)
+		fmt.Printf("Inbox (%d %s):\n\n", len(issues), label)
 
-		for _, t := range items {
-			id := display.Truncate(t.ID, 8)
-			fmt.Printf("  %s %s  %s  %-12s  %-35s  %s\n",
-				display.PriorityDot(t.Priority),
-				display.Dim.Render(id),
-				display.PriorityLabel(t.Priority),
-				display.AccountLabel(t.Account),
-				display.Truncate(t.Subject, 35),
-				display.Dim.Render(t.Action),
+		for _, issue := range issues {
+			pri := beads.PriorityFromBeads(issue.Priority)
+			fmt.Printf("  %s %s  %s  %s\n",
+				display.PriorityDot(pri),
+				display.Dim.Render(issue.ID),
+				display.PriorityLabel(pri),
+				display.Dim.Render(issue.Title),
 			)
 		}
 		return nil
@@ -73,6 +91,6 @@ var inboxCmd = &cobra.Command{
 func init() {
 	inboxCmd.Flags().StringVar(&inboxAccount, "account", "", "Filter by account (partial match)")
 	inboxCmd.Flags().StringVar(&inboxPriority, "priority", "", "Filter by priority")
-	inboxCmd.Flags().BoolVar(&inboxAll, "all", false, "Include done/dismissed")
+	inboxCmd.Flags().BoolVar(&inboxAll, "all", false, "Include closed/dismissed")
 	rootCmd.AddCommand(inboxCmd)
 }

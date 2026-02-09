@@ -19,45 +19,27 @@ type Email struct {
 	FetchedAt string `json:"fetched_at"`
 }
 
-// Triage represents an AI-generated triage decision for an email thread.
-type Triage struct {
-	ID           string `json:"id"`
-	ThreadID     string `json:"thread_id"`
-	Account      string `json:"account"`
-	Subject      string `json:"subject"`
-	From         string `json:"from,omitempty"`
-	Priority     string `json:"priority"`
-	Action       string `json:"action"`
-	Suggestion   string `json:"suggestion,omitempty"`
-	AgentNotes   string `json:"agent_notes,omitempty"`
-	Category     string `json:"category,omitempty"`
-	Status       string `json:"status"`
-	SnoozedUntil string `json:"snoozed_until,omitempty"`
-	EmailCount   int    `json:"email_count"`
-	LatestDate   string `json:"latest_date,omitempty"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at,omitempty"`
+// TriageRef is a thin cross-reference mapping an email thread to a beads issue.
+// All triage state (priority, status, action, dependencies) lives in beads.
+type TriageRef struct {
+	ThreadID  string `json:"thread_id"`
+	Account   string `json:"account"`
+	BeadID    string `json:"bead_id"`
+	CreatedAt string `json:"created_at"`
 }
 
-// TriageDep represents a dependency between triage entries.
-type TriageDep struct {
-	TriageID    string `json:"triage_id"`
-	DependsOnID string `json:"depends_on_id"`
-	CreatedAt   string `json:"created_at"`
-}
-
-// Thread groups emails by thread_id + account with optional triage.
+// Thread groups emails by thread_id + account with optional triage reference.
 type Thread struct {
-	ThreadID   string  `json:"thread_id"`
-	Account    string  `json:"account"`
-	Subject    string  `json:"subject"`
-	From       string  `json:"from"`
-	EmailCount int     `json:"email_count"`
-	LatestDate string  `json:"latest_date"`
-	Triage     *Triage `json:"triage,omitempty"`
+	ThreadID   string     `json:"thread_id"`
+	Account    string     `json:"account"`
+	Subject    string     `json:"subject"`
+	From       string     `json:"from"`
+	EmailCount int        `json:"email_count"`
+	LatestDate string     `json:"latest_date"`
+	TriageRef  *TriageRef `json:"triage_ref,omitempty"`
 }
 
-// Priority constants.
+// Priority constants (used for mb triage CLI flags, mapped to beads priorities).
 const (
 	PriorityHigh   = "high"
 	PriorityMedium = "medium"
@@ -78,33 +60,13 @@ func IsValidPriority(p string) bool {
 	return false
 }
 
-// Status constants.
-const (
-	StatusPending   = "pending"
-	StatusDone      = "done"
-	StatusDismissed = "dismissed"
-	StatusSnoozed   = "snoozed"
-)
-
-// ValidStatuses is the set of allowed status values.
-var ValidStatuses = []string{StatusPending, StatusDone, StatusDismissed, StatusSnoozed}
-
-// IsValidStatus checks if a status string is valid.
-func IsValidStatus(s string) bool {
-	for _, v := range ValidStatuses {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
 // SyncResult holds the result of syncing a single account.
 type SyncResult struct {
-	Account string `json:"account"`
-	Fetched int    `json:"fetched"`
-	Skipped int    `json:"skipped"`
-	Error   string `json:"error,omitempty"`
+	Account   string `json:"account"`
+	Fetched   int    `json:"fetched"`
+	Skipped   int    `json:"skipped"`
+	Commented int    `json:"commented,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // SyncSummary holds the result of syncing all accounts.

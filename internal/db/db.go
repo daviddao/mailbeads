@@ -2,9 +2,7 @@
 package db
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +20,7 @@ type DB struct {
 }
 
 // Open opens (or creates) a mailbeads database at the given path.
+// Automatically migrates from old schema if needed.
 func Open(dbPath string) (*DB, error) {
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -33,12 +32,38 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
+	d := &DB{conn: conn, path: dbPath}
+
+	// Check if we need to migrate from old schema.
+	if d.needsMigration() {
+		if err := d.migrate(); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("migrate schema: %w", err)
+		}
+	}
+
+	// Apply current schema (creates tables if they don't exist).
 	if _, err := conn.Exec(Schema); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("initialize schema: %w", err)
 	}
 
-	return &DB{conn: conn, path: dbPath}, nil
+	return d, nil
+}
+
+// needsMigration checks if the old triage schema (with 'action' column) exists.
+func (d *DB) needsMigration() bool {
+	var name string
+	err := d.conn.QueryRow(
+		"SELECT name FROM pragma_table_info('triage') WHERE name = 'action'",
+	).Scan(&name)
+	return err == nil && name == "action"
+}
+
+// migrate runs the V2 schema migration.
+func (d *DB) migrate() error {
+	_, err := d.conn.Exec(MigrationV2)
+	return err
 }
 
 // Close closes the database connection.
@@ -52,15 +77,6 @@ func (d *DB) Close() error {
 // Path returns the database file path.
 func (d *DB) Path() string {
 	return d.path
-}
-
-// GenID generates a random 16-character hex ID.
-func GenID() string {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("crypto/rand failed: %v", err))
-	}
-	return hex.EncodeToString(b)
 }
 
 // Now returns the current time as an ISO 8601 string.
@@ -219,9 +235,123 @@ func scanEmails(rows *sql.Rows) ([]*types.Email, error) {
 	return result, rows.Err()
 }
 
-// --- Triage operations ---
+// --- Triage cross-reference operations ---
 
-// UntriageThreads returns threads without a triage entry (or with stale triage).
+// GetTriageRef returns the triage cross-reference for a thread, or nil if untriaged.
+func (d *DB) GetTriageRef(threadID, account string) (*types.TriageRef, error) {
+	t := &types.TriageRef{}
+	err := d.conn.QueryRow(`
+		SELECT thread_id, account, bead_id, created_at
+		FROM triage
+		WHERE thread_id = ? AND account = ?`, threadID, account).Scan(
+		&t.ThreadID, &t.Account, &t.BeadID, &t.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// GetTriageRefByBead returns the triage cross-reference for a bead ID.
+func (d *DB) GetTriageRefByBead(beadID string) (*types.TriageRef, error) {
+	t := &types.TriageRef{}
+	err := d.conn.QueryRow(`
+		SELECT thread_id, account, bead_id, created_at
+		FROM triage
+		WHERE bead_id = ?`, beadID).Scan(
+		&t.ThreadID, &t.Account, &t.BeadID, &t.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// UpsertTriageRef creates or updates a triage cross-reference.
+func (d *DB) UpsertTriageRef(threadID, account, beadID string) (created bool, err error) {
+	existing, err := d.GetTriageRef(threadID, account)
+	if err != nil {
+		return false, err
+	}
+
+	now := Now()
+	if existing != nil {
+		_, err = d.conn.Exec(`
+			UPDATE triage SET bead_id = ? WHERE thread_id = ? AND account = ?`,
+			beadID, threadID, account,
+		)
+		return false, err
+	}
+
+	_, err = d.conn.Exec(`
+		INSERT INTO triage (thread_id, account, bead_id, created_at)
+		VALUES (?, ?, ?, ?)`,
+		threadID, account, beadID, now,
+	)
+	return true, err
+}
+
+// DeleteTriageRef removes a triage cross-reference by bead ID.
+func (d *DB) DeleteTriageRef(beadID string) error {
+	_, err := d.conn.Exec("DELETE FROM triage WHERE bead_id = ?", beadID)
+	return err
+}
+
+// AllTriageRefs returns all triage cross-references.
+func (d *DB) AllTriageRefs() ([]*types.TriageRef, error) {
+	rows, err := d.conn.Query(`
+		SELECT thread_id, account, bead_id, created_at
+		FROM triage
+		ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*types.TriageRef
+	for rows.Next() {
+		t := &types.TriageRef{}
+		if err := rows.Scan(&t.ThreadID, &t.Account, &t.BeadID, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, t)
+	}
+	return result, rows.Err()
+}
+
+// LegacyTriageRefs returns triage refs with "legacy-" prefixed bead IDs
+// (created during schema migration, not yet migrated to real beads issues).
+func (d *DB) LegacyTriageRefs() ([]*types.TriageRef, error) {
+	rows, err := d.conn.Query(`
+		SELECT thread_id, account, bead_id, created_at
+		FROM triage
+		WHERE bead_id LIKE 'legacy-%'
+		ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*types.TriageRef
+	for rows.Next() {
+		t := &types.TriageRef{}
+		if err := rows.Scan(&t.ThreadID, &t.Account, &t.BeadID, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, t)
+	}
+	return result, rows.Err()
+}
+
+// --- Thread queries ---
+
+// UntriagedThreads returns threads without a triage entry.
 func (d *DB) UntriagedThreads(account string, limit int) ([]*types.Thread, error) {
 	query := `
 		SELECT e.thread_id, e.account,
@@ -245,7 +375,7 @@ func (d *DB) UntriagedThreads(account string, limit int) ([]*types.Thread, error
 	}
 
 	query += ` GROUP BY e.thread_id, e.account
-		HAVING t.id IS NULL OR t.latest_date < MAX(e.date)
+		HAVING t.bead_id IS NULL
 		ORDER BY latest_date DESC`
 
 	if limit > 0 {
@@ -269,6 +399,42 @@ func (d *DB) UntriagedThreads(account string, limit int) ([]*types.Thread, error
 	return threads, rows.Err()
 }
 
+// ThreadsWithNewEmails returns threads that have a triage ref but received
+// new emails since triage (by checking if the thread's latest email date is
+// newer than the triage created_at). Returns the thread info and the triage ref.
+func (d *DB) ThreadsWithNewEmails() ([]*types.Thread, error) {
+	rows, err := d.conn.Query(`
+		SELECT e.thread_id, e.account,
+		       MAX(e.subject) as subject,
+		       MAX(e.from_addr) as from_addr,
+		       COUNT(e.id) as email_count,
+		       MAX(e.date) as latest_date,
+		       t.bead_id, t.created_at
+		FROM emails e
+		JOIN triage t ON e.thread_id = t.thread_id AND e.account = t.account
+		GROUP BY e.thread_id, e.account
+		HAVING MAX(e.fetched_at) > t.created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var threads []*types.Thread
+	for rows.Next() {
+		t := &types.Thread{}
+		ref := &types.TriageRef{}
+		if err := rows.Scan(&t.ThreadID, &t.Account, &t.Subject, &t.From,
+			&t.EmailCount, &t.LatestDate, &ref.BeadID, &ref.CreatedAt); err != nil {
+			return nil, err
+		}
+		ref.ThreadID = t.ThreadID
+		ref.Account = t.Account
+		t.TriageRef = ref
+		threads = append(threads, t)
+	}
+	return threads, rows.Err()
+}
+
 // ThreadInfo returns aggregated info about a thread from the emails table.
 func (d *DB) ThreadInfo(threadID, account string) (*types.Thread, error) {
 	t := &types.Thread{}
@@ -285,325 +451,7 @@ func (d *DB) ThreadInfo(threadID, account string) (*types.Thread, error) {
 	return t, nil
 }
 
-// GetTriage returns the triage entry for a thread.
-func (d *DB) GetTriage(threadID, account string) (*types.Triage, error) {
-	t := &types.Triage{}
-	var from, suggestion, agentNotes, category, snoozed, latestDate, updatedAt sql.NullString
-	err := d.conn.QueryRow(`
-		SELECT id, thread_id, account, subject, from_addr, priority, action,
-		       suggestion, agent_notes, category, status, snoozed_until,
-		       email_count, latest_date, created_at, updated_at
-		FROM triage
-		WHERE thread_id = ? AND account = ?`, threadID, account).Scan(
-		&t.ID, &t.ThreadID, &t.Account, &t.Subject, &from, &t.Priority, &t.Action,
-		&suggestion, &agentNotes, &category, &t.Status, &snoozed,
-		&t.EmailCount, &latestDate, &t.CreatedAt, &updatedAt,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	t.From = from.String
-	t.Suggestion = suggestion.String
-	t.AgentNotes = agentNotes.String
-	t.Category = category.String
-	t.SnoozedUntil = snoozed.String
-	t.LatestDate = latestDate.String
-	t.UpdatedAt = updatedAt.String
-	return t, nil
-}
-
-// GetTriageByID returns a triage entry by its ID (supports partial match).
-func (d *DB) GetTriageByID(id string) (*types.Triage, error) {
-	// Try exact match first
-	t, err := d.getTriageByExactID(id)
-	if err != nil {
-		return nil, err
-	}
-	if t != nil {
-		return t, nil
-	}
-	// Try prefix match
-	rows, err := d.conn.Query(`
-		SELECT id, thread_id, account, subject, from_addr, priority, action,
-		       suggestion, agent_notes, category, status, snoozed_until,
-		       email_count, latest_date, created_at, updated_at
-		FROM triage
-		WHERE id LIKE ?`, id+"%")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var matches []*types.Triage
-	for rows.Next() {
-		t := &types.Triage{}
-		var from, suggestion, agentNotes, category, snoozed, latestDate, updatedAt sql.NullString
-		if err := rows.Scan(
-			&t.ID, &t.ThreadID, &t.Account, &t.Subject, &from, &t.Priority, &t.Action,
-			&suggestion, &agentNotes, &category, &t.Status, &snoozed,
-			&t.EmailCount, &latestDate, &t.CreatedAt, &updatedAt,
-		); err != nil {
-			return nil, err
-		}
-		t.From = from.String
-		t.Suggestion = suggestion.String
-		t.AgentNotes = agentNotes.String
-		t.Category = category.String
-		t.SnoozedUntil = snoozed.String
-		t.LatestDate = latestDate.String
-		t.UpdatedAt = updatedAt.String
-		matches = append(matches, t)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	switch len(matches) {
-	case 0:
-		return nil, fmt.Errorf("triage entry %q not found", id)
-	case 1:
-		return matches[0], nil
-	default:
-		ids := make([]string, len(matches))
-		for i, m := range matches {
-			ids[i] = m.ID
-		}
-		return nil, fmt.Errorf("ambiguous ID %q, matches: %s", id, strings.Join(ids, ", "))
-	}
-}
-
-func (d *DB) getTriageByExactID(id string) (*types.Triage, error) {
-	t := &types.Triage{}
-	var from, suggestion, agentNotes, category, snoozed, latestDate, updatedAt sql.NullString
-	err := d.conn.QueryRow(`
-		SELECT id, thread_id, account, subject, from_addr, priority, action,
-		       suggestion, agent_notes, category, status, snoozed_until,
-		       email_count, latest_date, created_at, updated_at
-		FROM triage
-		WHERE id = ?`, id).Scan(
-		&t.ID, &t.ThreadID, &t.Account, &t.Subject, &from, &t.Priority, &t.Action,
-		&suggestion, &agentNotes, &category, &t.Status, &snoozed,
-		&t.EmailCount, &latestDate, &t.CreatedAt, &updatedAt,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	t.From = from.String
-	t.Suggestion = suggestion.String
-	t.AgentNotes = agentNotes.String
-	t.Category = category.String
-	t.SnoozedUntil = snoozed.String
-	t.LatestDate = latestDate.String
-	t.UpdatedAt = updatedAt.String
-	return t, nil
-}
-
-// UpsertTriage creates or updates a triage entry.
-func (d *DB) UpsertTriage(t *types.Triage) (created bool, err error) {
-	existing, err := d.GetTriage(t.ThreadID, t.Account)
-	if err != nil {
-		return false, err
-	}
-
-	now := Now()
-	if existing != nil {
-		_, err = d.conn.Exec(`
-			UPDATE triage SET
-				subject = ?, from_addr = ?, priority = ?, action = ?,
-				suggestion = ?, agent_notes = ?, category = ?,
-				email_count = ?, latest_date = ?, updated_at = ?, status = 'pending'
-			WHERE id = ?`,
-			t.Subject, nullStr(t.From), t.Priority, t.Action,
-			nullStr(t.Suggestion), nullStr(t.AgentNotes), nullStr(t.Category),
-			t.EmailCount, nullStr(t.LatestDate), now, existing.ID,
-		)
-		t.ID = existing.ID
-		return false, err
-	}
-
-	t.ID = GenID()
-	t.CreatedAt = now
-	_, err = d.conn.Exec(`
-		INSERT INTO triage
-			(id, thread_id, account, subject, from_addr, priority, action,
-			 suggestion, agent_notes, category, status, email_count, latest_date, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
-		t.ID, t.ThreadID, t.Account, t.Subject, nullStr(t.From), t.Priority, t.Action,
-		nullStr(t.Suggestion), nullStr(t.AgentNotes), nullStr(t.Category),
-		t.EmailCount, nullStr(t.LatestDate), now,
-	)
-	return true, err
-}
-
-// UpdateTriageStatus updates the status of a triage entry.
-func (d *DB) UpdateTriageStatus(id, status string) error {
-	res, err := d.conn.Exec(
-		"UPDATE triage SET status = ?, updated_at = ? WHERE id = ?",
-		status, Now(), id,
-	)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("triage entry %q not found", id)
-	}
-	return nil
-}
-
-// ListTriage returns triage entries filtered by status and optional account.
-func (d *DB) ListTriage(status, account string, includeAll bool) ([]*types.Triage, error) {
-	query := "SELECT id, thread_id, account, subject, from_addr, priority, action, suggestion, agent_notes, category, status, snoozed_until, email_count, latest_date, created_at, updated_at FROM triage"
-
-	var conditions []string
-	var args []any
-
-	if !includeAll {
-		if status != "" {
-			conditions = append(conditions, "status = ?")
-			args = append(args, status)
-		} else {
-			conditions = append(conditions, "status = 'pending'")
-		}
-	}
-	if account != "" {
-		conditions = append(conditions, "account LIKE ?")
-		args = append(args, "%"+account+"%")
-	}
-
-	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
-	}
-
-	query += ` ORDER BY
-		CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 WHEN 'spam' THEN 3 END,
-		latest_date DESC`
-
-	rows, err := d.conn.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []*types.Triage
-	for rows.Next() {
-		t := &types.Triage{}
-		var from, suggestion, agentNotes, category, snoozed, latestDate, updatedAt sql.NullString
-		if err := rows.Scan(
-			&t.ID, &t.ThreadID, &t.Account, &t.Subject, &from, &t.Priority, &t.Action,
-			&suggestion, &agentNotes, &category, &t.Status, &snoozed,
-			&t.EmailCount, &latestDate, &t.CreatedAt, &updatedAt,
-		); err != nil {
-			return nil, err
-		}
-		t.From = from.String
-		t.Suggestion = suggestion.String
-		t.AgentNotes = agentNotes.String
-		t.Category = category.String
-		t.SnoozedUntil = snoozed.String
-		t.LatestDate = latestDate.String
-		t.UpdatedAt = updatedAt.String
-		result = append(result, t)
-	}
-	return result, rows.Err()
-}
-
-// ReadyTriage returns actionable triage items (pending, not snoozed, not blocked).
-func (d *DB) ReadyTriage(account string) ([]*types.Triage, error) {
-	query := `
-		SELECT t.id, t.thread_id, t.account, t.subject, t.from_addr, t.priority, t.action,
-		       t.suggestion, t.agent_notes, t.category, t.status, t.snoozed_until,
-		       t.email_count, t.latest_date, t.created_at, t.updated_at
-		FROM triage t
-		WHERE t.status = 'pending'
-		  AND (t.snoozed_until IS NULL OR t.snoozed_until <= datetime('now'))
-		  AND NOT EXISTS (
-		      SELECT 1 FROM triage_deps d
-		      JOIN triage blocker ON d.depends_on_id = blocker.id
-		      WHERE d.triage_id = t.id AND blocker.status = 'pending'
-		  )`
-
-	var args []any
-	if account != "" {
-		query += " AND t.account LIKE ?"
-		args = append(args, "%"+account+"%")
-	}
-
-	query += ` ORDER BY
-		CASE t.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 WHEN 'spam' THEN 3 END,
-		t.latest_date DESC`
-
-	rows, err := d.conn.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []*types.Triage
-	for rows.Next() {
-		t := &types.Triage{}
-		var from, suggestion, agentNotes, category, snoozed, latestDate, updatedAt sql.NullString
-		if err := rows.Scan(
-			&t.ID, &t.ThreadID, &t.Account, &t.Subject, &from, &t.Priority, &t.Action,
-			&suggestion, &agentNotes, &category, &t.Status, &snoozed,
-			&t.EmailCount, &latestDate, &t.CreatedAt, &updatedAt,
-		); err != nil {
-			return nil, err
-		}
-		t.From = from.String
-		t.Suggestion = suggestion.String
-		t.AgentNotes = agentNotes.String
-		t.Category = category.String
-		t.SnoozedUntil = snoozed.String
-		t.LatestDate = latestDate.String
-		t.UpdatedAt = updatedAt.String
-		result = append(result, t)
-	}
-	return result, rows.Err()
-}
-
-// TriageCountByStatus returns counts grouped by status.
-func (d *DB) TriageCountByStatus() (map[string]int, error) {
-	rows, err := d.conn.Query("SELECT status, COUNT(*) FROM triage GROUP BY status")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	counts := map[string]int{"pending": 0, "done": 0, "dismissed": 0, "snoozed": 0}
-	for rows.Next() {
-		var status string
-		var count int
-		if err := rows.Scan(&status, &count); err != nil {
-			return nil, err
-		}
-		counts[status] = count
-	}
-	return counts, rows.Err()
-}
-
-// TriageCountByPriority returns pending triage counts grouped by priority.
-func (d *DB) TriageCountByPriority() (map[string]int, error) {
-	rows, err := d.conn.Query("SELECT priority, COUNT(*) FROM triage WHERE status = 'pending' GROUP BY priority")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	counts := map[string]int{"high": 0, "medium": 0, "low": 0, "spam": 0}
-	for rows.Next() {
-		var priority string
-		var count int
-		if err := rows.Scan(&priority, &count); err != nil {
-			return nil, err
-		}
-		counts[priority] = count
-	}
-	return counts, rows.Err()
-}
+// --- Aggregate queries ---
 
 // UntriagedCount returns the number of untriaged threads.
 func (d *DB) UntriagedCount() int {
@@ -612,7 +460,14 @@ func (d *DB) UntriagedCount() int {
 		SELECT COUNT(DISTINCT e.thread_id || '|' || e.account)
 		FROM emails e
 		LEFT JOIN triage t ON e.thread_id = t.thread_id AND e.account = t.account
-		WHERE t.id IS NULL`).Scan(&n)
+		WHERE t.bead_id IS NULL`).Scan(&n)
+	return n
+}
+
+// TriagedCount returns the number of triaged threads.
+func (d *DB) TriagedCount() int {
+	var n int
+	d.conn.QueryRow("SELECT COUNT(*) FROM triage").Scan(&n)
 	return n
 }
 
@@ -642,11 +497,4 @@ func (d *DB) Accounts() []string {
 // Underlying returns the raw sql.DB connection (for frontend readonly access).
 func (d *DB) Underlying() *sql.DB {
 	return d.conn
-}
-
-func nullStr(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
 }
